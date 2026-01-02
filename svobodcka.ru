@@ -6,15 +6,24 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Flask(__name__)
 
-@app.route("/bothelp/webhook", methods=["POST"])
+@app.route("/bothelp/webhook", methods=["POST", "GET"])
 def webhook():
-    data = request.json or {}
+    # 1) Разрешим GET (на случай проверок) — просто отвечаем "ok"
+    if request.method == "GET":
+        return "ok", 200
+
+    # 2) Пытаемся прочитать JSON, если пришёл
+    data = request.get_json(silent=True)
+
+    # 3) Если JSON нет — читаем form-data / x-www-form-urlencoded
+    if not data:
+        data = request.form.to_dict()
 
     file_id = data.get("file_id")
     listing_id = data.get("listing_id", "unknown")
 
     if not file_id:
-        return jsonify({"error": "file_id not found"}), 400
+        return jsonify({"error": "file_id not found", "received": data}), 400
 
     r = requests.get(
         f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
@@ -32,7 +41,7 @@ def webhook():
     with open(filename, "wb") as f:
         f.write(photo)
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "saved_as": filename})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -25,11 +25,14 @@ def webhook():
     file_id = data.get("file_id")
     listing_id = data.get("listing_id", "unknown")
 
-    if not file_id:
-        return jsonify({
-            "error": "file_id not found",
-            "received": data
-        }), 400
+   if not file_id:
+    return jsonify({
+        "error": "file_id not found",
+        "content_type": request.content_type,
+        "form": request.form.to_dict(),
+        "json": request.get_json(silent=True),
+        "args": request.args.to_dict()
+    }), 400
 
     # Получаем путь файла в Telegram
     r = requests.get(

@@ -20,19 +20,17 @@ def webhook():
     if not data:
         data = request.form.to_dict()
 
-    print("INCOMING DATA:", data)
-
     file_id = data.get("file_id")
     listing_id = data.get("listing_id", "unknown")
 
-   if not file_id:
-    return jsonify({
-        "error": "file_id not found",
-        "content_type": request.content_type,
-        "form": request.form.to_dict(),
-        "json": request.get_json(silent=True),
-        "args": request.args.to_dict()
-    }), 400
+    if not file_id:
+        return jsonify({
+            "error": "file_id not found",
+            "content_type": request.content_type,
+            "form": request.form.to_dict(),
+            "json": request.get_json(silent=True),
+            "args": request.args.to_dict()
+        }), 400
 
     # Получаем путь файла в Telegram
     r = requests.get(
@@ -58,6 +56,6 @@ def webhook():
     })
 
 
-if __name__ == "__main__":
+if name == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

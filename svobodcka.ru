@@ -1,32 +1,58 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import time
+from urllib.parse import unquote
 
-# Токен бота берём из Render → Environment → BOT_TOKEN
+# Render → Environment → BOT_TOKEN (нужен только если будешь скачивать через Telegram file_id)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Flask(__name__)
 
-# Сюда будем сохранять последний входящий запрос от BotHelp (для отладки)
+# Последний входящий запрос от BotHelp (для отладки)
 LAST = {}
+
+
+def _save_bytes(content: bytes, filename: str) -> str:
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "wb") as f:
+        f.write(content)
+    return filename
+
+
+def _guess_ext_from_url(url: str) -> str:
+    # Берём расширение из URL без query
+    base = url.split("?", 1)[0]
+    _, ext = os.path.splitext(base)
+    return ext if ext else ".jpg"
+
+
+@app.route("/", methods=["GET"])
+def root():
+    return "ok", 200
+
+
+@app.route("/debug/last", methods=["GET"])
+def debug_last():
+    return jsonify(LAST), 200
 
 
 @app.route("/bothelp/webhook", methods=["POST", "GET"])
 def bothelp_webhook():
     global LAST
 
-    # BotHelp/браузер иногда делает GET/HEAD проверку — отвечаем "ok"
+    # Проверочный GET (иногда сервисы стучатся)
     if request.method == "GET":
         return "ok", 200
 
-    # Пытаемся прочитать JSON
+    # 1) Пытаемся прочитать JSON
     data = request.get_json(silent=True)
 
-    # Если не JSON — читаем form-data / x-www-form-urlencoded
+    # 2) Если не JSON — читаем form-data / x-www-form-urlencoded
     if not data:
         data = request.form.to_dict()
 
-    # Сохраняем "сырьё" последнего запроса для просмотра в /debug/last
+    # Сохраняем всё для /debug/last
     LAST = {
         "content_type": request.content_type,
         "form": request.form.to_dict(),
@@ -35,99 +61,104 @@ def bothelp_webhook():
         "data": data
     }
 
-    # Пробуем достать file_id (пока ожидаем, что BotHelp пришлёт именно file_id)
+    # --- Достаём поля ---
+    image_url = None
     file_id = None
+    listing_id = "unknown"
 
-    # 1) Самый простой вариант
     if isinstance(data, dict):
+        image_url = data.get("image_url") or data.get("url") or data.get("photo_url")
         file_id = data.get("file_id")
 
-    # 2) Если вдруг BotHelp прислал photo как список размеров (редко, но бывает)
-    if not file_id and isinstance(data, dict) and isinstance(data.get("photo"), list) and len(data["photo"]) > 0:
-        last_item = data["photo"][-1]
-        if isinstance(last_item, dict):
-            file_id = last_item.get("file_id")
+        # если у тебя есть ID квартиры — сюда же
+        listing_id = data.get("listing_id") or data.get("flat_id") or data.get("item_id") or "unknown"
 
-    # Идентификатор карточки/квартиры (что пришлют — то и используем)
-    listing_id = "unknown"
-    if isinstance(data, dict):
-        listing_id = data.get("listing_id") or data.get("item_id") or data.get("flat_id") or "unknown"
+    # --- Вариант А: BotHelp дал ссылку (у тебя сейчас именно так) ---
+    if image_url:
+        try:
+            # BotHelp иногда отдаёт url с двойной кодировкой (%252F -> %2F -> /)
+            # unquote 2 раза — самый надёжный способ
+            clean_url = unquote(unquote(image_url))
 
-    # Если file_id не нашли — вернём 400 и покажем что пришло
-    if not file_id:
-        return jsonify({
-            "error": "file_id not found",
-            "hint": "Открой /debug/last и посмотри, какие поля реально присылает BotHelp",
-            "received": LAST
-        }), 400
+            resp = requests.get(clean_url, timeout=40)
+            resp.raise_for_status()
 
-    if not BOT_TOKEN:
-        return jsonify({
-            "error": "BOT_TOKEN is missing",
-            "hint": "Render → Environment → добавь переменную BOT_TOKEN"
-        }), 500
+            ext = _guess_ext_from_url(clean_url)
+            filename = f"photos/{listing_id}_{int(time.time())}{ext}"
 
-    # --- Скачиваем файл из Telegram по file_id ---
-    try:
-        # 1) Получаем file_path через getFile
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-            params={"file_id": file_id},
-            timeout=20
-        )
-        r.raise_for_status()
-        j = r.json()
-        if not j.get("ok"):
-            return jsonify({"error": "Telegram getFile failed", "telegram": j}), 502
+            _save_bytes(resp.content, filename)
 
-        file_path = j["result"]["file_path"]
+            return jsonify({
+                "ok": True,
+                "mode": "image_url",
+                "saved_as": filename,
+                "listing_id": listing_id,
+                "source_url": clean_url
+            }), 200
 
-        # 2) Скачиваем файл
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        photo_resp = requests.get(file_url, timeout=40)
-        photo_resp.raise_for_status()
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": "Failed to download/save by image_url",
+                "detail": str(e),
+                "received": LAST
+            }), 500
 
-        # Сохраняем на диск (для тестов ок; для продакшна лучше S3/облако)
-        os.makedirs("photos", exist_ok=True)
+    # --- Вариант B: если когда-нибудь появится file_id (через Telegram API) ---
+    if file_id:
+        if not BOT_TOKEN:
+            return jsonify({
+                "ok": False,
+                "error": "BOT_TOKEN is missing (Render → Environment)",
+                "received": LAST
+            }), 500
 
-        # Расширение берём из file_path если есть
-        ext = os.path.splitext(file_path)[1] or ".jpg"
-        filename = f"photos/{listing_id}_{file_id}{ext}"
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": file_id},
+                timeout=20
+            )
+            r.raise_for_status()
+            j = r.json()
+            if not j.get("ok"):
+                return jsonify({"ok": False, "error": "Telegram getFile failed", "telegram": j}), 502
 
-        with open(filename, "wb") as f:
-            f.write(photo_resp.content)
+            file_path = j["result"]["file_path"]
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
-        return jsonify({
-            "ok": True,
-            "saved_as": filename,
-            "listing_id": listing_id,
-            "file_id": file_id
-        }), 200
+            photo_resp = requests.get(file_url, timeout=40)
+            photo_resp.raise_for_status()
 
-    except Exception as e:
-        return jsonify({
-            "error": "download/save failed",
-            "detail": str(e)
-        }), 500
+            ext = os.path.splitext(file_path)[1] or ".jpg"
+            filename = f"photos/{listing_id}_{file_id}{ext}"
+            _save_bytes(photo_resp.content, filename)
+
+    return jsonify({
+                "ok": True,
+                "mode": "telegram_file_id",
+                "saved_as": filename,
+                "listing_id": listing_id,
+                "file_id": file_id
+            }), 200
+
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": "Failed to download/save by file_id",
+                "detail": str(e),
+                "received": LAST
+            }), 500
+
+    # --- Если ни ссылки, ни file_id ---
+    return jsonify({
+        "ok": False,
+        "error": "No image_url or file_id in request",
+        "hint": "Проверь BotHelp: внешний запрос должен отправлять image_url (ссылку) или file_id",
+        "received": LAST
+    }), 400
 
 
-@app.route("/debug/last", methods=["GET"])
-def debug_last():
-    """
-    Показывает последний входящий запрос от BotHelp.
-    Открой в браузере:
-    https://твой-сервис.onrender.com/debug/last
-    """
-    return jsonify(LAST), 200
-
-
-@app.route("/", methods=["GET"])
-def root():
-    # Просто чтобы главная не пугала 404
-    return "ok", 200
-
-
-if __name__ == "__main__":
-    # Render даёт порт в переменной окружения PORT
+if name == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

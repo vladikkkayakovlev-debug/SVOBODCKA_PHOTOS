@@ -134,7 +134,7 @@ def bothelp_webhook():
             filename = f"photos/{listing_id}_{file_id}{ext}"
             _save_bytes(photo_resp.content, filename)
 
-    return jsonify({
+            return jsonify({
                 "ok": True,
                 "mode": "telegram_file_id",
                 "saved_as": filename,
@@ -159,6 +159,6 @@ def bothelp_webhook():
     }), 400
 
 
-if name == "__main__":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

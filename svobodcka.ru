@@ -19,6 +19,8 @@ def webhook():
     if not data:
         data = request.form.to_dict()
 
+print("INCOMING DATA:", data)
+
     file_id = data.get("file_id")
     listing_id = data.get("listing_id", "unknown")
 
